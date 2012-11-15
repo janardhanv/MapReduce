@@ -5,10 +5,15 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"fmt"
 	"log"
+	"os"
 )
 
 func main() {
-	db, err := sql.Open("sqlite3", "./db.sql")
+	file := "db.sql"
+	if len(os.Args) > 1 {
+		file = os.Args[1]
+	}
+	db, err := sql.Open("sqlite3", "./"+file)
 	if err != nil {
 		log.Println(err)
 		return

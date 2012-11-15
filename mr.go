@@ -5,7 +5,7 @@
  *
  */
 
-package main
+package mapreduce
 
 import (
 	"bufio"
@@ -18,6 +18,18 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"time"
+)
+
+const (
+	WORK_DONE	= "1"
+	WORK_MAP	= "2"
+	WORK_REDUCE = "3"
+)
+
+const (
+	TYPE_MAP = iota
+	TYPE_REDUCE
 )
 
 type Request struct {
@@ -27,15 +39,33 @@ type Request struct {
 
 type Response struct {
 	Message string
+	Database string
+	Offset int
+	Chunksize int
+	Type int
 }
 
 type Master struct {
 	Address string
+	Database string
+	Offset int
+	Chunksize int
+	Count int
+	M int
+	R int
 }
 
-func (self *Master) Ping(_ Request, response *Response) error {
-	response.Message = "Successfully Pinged " + self.Address
-	log.Println("I Got Pinged")
+func (self *Master) GetWork(req Request, response *Response) error {
+	if req.Message == WORK_DONE || self.Offset > self.Count {
+		response.Message = WORK_DONE
+		return nil
+	}
+	response.Database = self.Database
+	response.Offset = self.Offset
+	response.Chunksize = self.Chunksize
+	response.Type = TYPE_MAP
+	self.Offset = self.Offset + self.Chunksize
+
 	return nil
 }
 
@@ -86,9 +116,10 @@ func main() {
 	var data, master string
 	var m, r int
 	var ismaster bool
-	flag.BoolVar(&ismaster, "ismaster", false, "True for master, false for worker")
-	flag.StringVar(&master, "master", "localhost:3410", "True for master, false for worker")
+	flag.BoolVar(&ismaster, "ismaster", false, "True for master, false for worker.")
+	flag.StringVar(&master, "master", "localhost:3410", "The location of the master.")
 	flag.StringVar(&data, "dataset", "db.sql", "The data set to load from file.")
+	flag.StringVar(&output, "output", "output", "Where to save the output.")
 	flag.IntVar(&m, "m", 1, "The number of map tasks to run.")
 	flag.IntVar(&r, "r", 1, "The number of reduce tasks to run.")
 	flag.Parse()
@@ -99,22 +130,22 @@ func main() {
 		db, err := sql.Open("sqlite3", "./" + data)
 		if err != nil {
 			log.Println(err)
-				failure("sql.Open")
-				return
+			failure("sql.Open")
+			return
 		}
 		defer db.Close()
 
 		/*
 		 * // MASTER - counts the data
 		 * select count(*) from data;
-		// Divide the count up among the number of mapper
+		 * // Divide the count up among the number of mapper
 		 *
 		 * // MAPPER - reads its range (limit, offset)
 		 * select * from data order by key limit 2 offset 1;
 		 *
 		 * select distinct key .....
 		 */
-		query, err := db.Query("select count(*) from data;",)
+		query, err := db.Query("select count(*) from data;")
 		if err != nil {
 			fmt.Println(err)
 				return
@@ -132,6 +163,13 @@ func main() {
 
 		// Set up the RPC server to listen for workers
 		me := new(Master)
+		me.Chunksize = chunksize
+		me.M = m
+		me.R = r
+		me.Offset = 0
+		me.Database = data
+		me.Count = count
+
 		rpc.Register(me)
 		rpc.HandleHTTP()
 
@@ -142,9 +180,15 @@ func main() {
 				os.Exit(1)
 			}
 		}()
+		for {
+			time.Sleep(1e9)
+			fmt.Print(".")
+		}
 	} else {
 		for {
-			// Call master, asking for work
+			/*
+			 * Call master, asking for work
+			 */
 
 			var resp Response
 			var req Request
@@ -153,31 +197,89 @@ func main() {
 				failure("GetWork")
 				continue
 			}
-			log.Println(resp.Message)
-		}
-	}
-/*
-	readline := make(chan string, 1)
+			if resp.Message == WORK_DONE {
+				log.Println("Finished Working")
+				break
+			}
 
-	mainloop: for {
-		go readLine(readline)
-		line := <-readline
-		l := strings.Split(strings.TrimSpace(line), " ")
-		if strings.ToLower(l[0]) == "quit" {
-			fmt.Println("QUIT")
-			fmt.Println("Goodbye. . .")
-			break mainloop
-		} else if strings.ToLower(l[0]) == "ping" {
-			var resp Response
-			var req Request
-			//net.JoinHostPort(host, port)
-			err := call(master, "Ping", req, &resp)
+			/*
+			 * Do work
+			 */
+
+			log.Println(resp.Message)
+
+			if resp.Type == TYPE_MAP {
+				// Load data
+				db, err := sql.Open("sqlite3", "./" + resp.Database)
+				if err != nil {
+					log.Println(err)
+					failure("sql.Open")
+					return
+				}
+				defer db.Close()
+
+				// Query
+				rows, err := db.Query(fmt.Sprintf("select key, value from data limit %d offset %d;", resp.Chunksize, resp.Offset))
+				if err != nil {
+					fmt.Println(err)
+					failure("sql.Query")
+					return
+				}
+				defer rows.Close()
+
+				// Temp storage
+				// TODO: How do I change directories to save the tmp files?
+				db_tmp, err := sql.Open("sqlite3", "./tmp.sql")
+				if err != nil {
+					log.Println(err)
+					failure("sql.Open")
+					return
+				}
+
+				// Prepare tmp database
+				sqls := []string{
+					"create table if not exists data (key text not null, value text not null)",
+					"create index if not exists data_key on data (key asc, value asc);",
+				}
+				for _, sql := range sqls {
+					_, err = db_tmp.Exec(sql)
+					if err != nil {
+						fmt.Printf("%q: %s\n", err, sql)
+						return
+					}
+				}
+
+				for rows.Next() {
+					var key string
+					var value string
+					rows.Scan(&key, &value)
+					// Write the data locally
+					sql := fmt.Sprintf("insert into data values ('%s', '%s');", key, value)
+					_, err = db_tmp.Exec(sql)
+					if err != nil {
+						fmt.Printf("%q: %s\n", err, sql)
+						return
+					} else {
+						fmt.Println(key, value)
+					}
+				}
+				db_tmp.Close()
+			}
+
+			/*
+			 * Notify the master when I'm done
+			 */
+
+			req.Message = WORK_DONE
+			err = call(master, "GetWork", req, &resp)
 			if err != nil {
-				failure("Ping")
+				failure("GetWork")
 				continue
 			}
-			log.Println(resp.Message)
+			if resp.Message == WORK_DONE {
+				log.Println("Finished Working")
+				break
+			}
 		}
 	}
-	*/
 }
