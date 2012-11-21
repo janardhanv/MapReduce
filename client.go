@@ -92,7 +92,9 @@ func main() {
 		}
 	} else {
 		logf("Worker - Master Location: %s", master)
-		err := mapreduce.StartWorker(mapreduce.MapFunc(identityMapper), mapreduce.ReduceFunc(identityReducer), master)
+		//err := mapreduce.StartWorker(mapreduce.MapFunc(identityMapper), mapreduce.ReduceFunc(identityReducer), master)
+		//err := mapreduce.StartWorker(identityMapper, identityReducer, master)
+		err := mapreduce.StartWorker(wordCountMapper, wordCountReducer, master)
 		if err != nil {
 			log.Println(err)
 		}

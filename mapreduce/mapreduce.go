@@ -133,14 +133,16 @@ func (self *Master) Notify(request Request, response *Response) error {
 func call(address, method string, request Request, response *Response) error {
 	client, err := rpc.DialHTTP("tcp", address)
 	if err != nil {
-		log.Println("rpc dial: ", err)
+		failure("rpc.Dial")
+		log.Println(err)
 		return err
 	}
 	defer client.Close()
 
 	err = client.Call("Master."+method, request, response)
 	if err != nil {
-		log.Println("rpc call: ", err)
+		failure("rpc.Call")
+		log.Println(err)
 		return err
 	}
 
@@ -149,12 +151,6 @@ func call(address, method string, request Request, response *Response) error {
 
 func failure(f string) {
 	log.Println("Call",f,"has failed.")
-}
-
-func usage() {
-	fmt.Println("Usage: ", os.Args[0], "[-dataset=data.sql] [-l=<n>] <local_port> [<port1>...<portn>] ")
-	fmt.Println("     -v        Verbose. Dispay the details of the paxos messages. Default is false")
-	fmt.Println("     -l        Latency. Sets the latency between messages as a random duration between [n,2n)")
 }
 
 func readLine(readline chan string) {
@@ -204,7 +200,8 @@ func StartMaster(config *Config) error {
 	// Count the work to be done
 	query, err := db.Query("select count(*) from data;")
 	if err != nil {
-		fmt.Println(err)
+		failure("sql.Query")
+		log.Println(err)
 		return err
 	}
 	defer query.Close()
@@ -246,7 +243,8 @@ func StartMaster(config *Config) error {
 	go func() {
 		err := http.ListenAndServe(master, nil)
 		if err != nil {
-			fmt.Println(err.Error())
+			failure("http.ListenAndServe")
+			log.Println(err.Error())
 			os.Exit(1)
 		}
 	}()
@@ -266,7 +264,11 @@ func StartMaster(config *Config) error {
  * select distinct key .....
  */
 func StartWorker(m MapFunc, r ReduceFunc, master string) error {
-	for {
+	tasks_run := 0
+	for { //TODO: Should this be a for loop?
+		logf("===============================")
+		logf("       Starting new task.")
+		logf("===============================")
 		/*
 		 * Call master, asking for work
 		 */
@@ -276,6 +278,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 		err := call(master, "GetWork", req, &resp)
 		if err != nil {
 			failure("GetWork")
+			tasks_run++
 			continue
 		}
 		if resp.Message == WORK_DONE {
@@ -294,6 +297,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 		// Close the sql files
 
 		if resp.Type == TYPE_MAP {
+			logf("MAP ID: %d", work.WorkerID)
 			// Load data
 			db, err := sql.Open("sqlite3", work.Filename)
 			if err != nil {
@@ -306,7 +310,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 			// Query
 			rows, err := db.Query(fmt.Sprintf("select key, value from data limit %d offset %d;", work.Size, work.Offset))
 			if err != nil {
-				fmt.Println(err)
+				log.Println(err)
 				failure("sql.Query")
 				return err
 			}
@@ -319,15 +323,17 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 
 				// Temp storage
 				// Each time the map function emits a key/value pair, you should figure out which reduce task that pair will go to.
-				var reducer *big.Int
+				reducer := big.NewInt(0)
 				reducer.Mod(hash(key), big.NewInt(int64(work.R)))
-				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64()))
+				//db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64())) //TODO: Directories don't work
+				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("map_out_%d.sql", reducer.Int64()))
+				defer db_tmp.Close()
 				if err != nil {
 					log.Println(err)
 					failure(fmt.Sprintf("sql.Open - /tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64()))
 					return err
 				}
-				defer db_tmp.Close()
+
 
 				// Prepare tmp database
 				sqls := []string{
@@ -337,18 +343,24 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 				for _, sql := range sqls {
 					_, err = db_tmp.Exec(sql)
 					if err != nil {
+						failure("sql.Exec")
 						fmt.Printf("%q: %s\n", err, sql)
 						return err
 					}
 				}
 
+
 				//type MapFunc func(key, value string, output chan<- Pair) error
 				outChan := make(chan Pair)
-				err = m(key, value, outChan)
-				if err != nil {
-					failure("map")
-					return err
-				}
+				go func() {
+					err = m(key, value, outChan)
+					if err != nil {
+						failure("map")
+						log.Println(err)
+						//return err
+					}
+				}()
+
 
 				// Get the output from the map function's output channel
 				//var pairs []Pair
@@ -359,23 +371,27 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 					sql := fmt.Sprintf("insert into data values ('%s', '%s');", key, value)
 					_, err = db_tmp.Exec(sql)
 					if err != nil {
+						failure("sql.Exec")
 						fmt.Printf("%q: %s\n", err, sql)
 						return err
 					}
-					//fmt.Println(key, value)
+					//log.Println(key, value)
 					pair = <-outChan
 				}
 			}
 
 			// Serve the files so each reducer can get them
-			// we use StripPrefix so that /tmpfiles/somefile will access /tmp/somefile
 			// /tmp/map_output/%d/tmp_map_out_%d.sql
-			go func() {
-				// TODO: Serve this incrementally starting at port 4000
-				// (4000 + work.WorkerID)
-				http.Handle("/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID))))
-			}()
+			if tasks_run == 0 {
+				go func() {
+					// TODO: Serve this incrementally starting at port 4000
+					// (4000 + work.WorkerID)
+					//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
+					http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf(".", work.WorkerID))))
+				}()
+			}
 		} else if resp.Type == TYPE_REDUCE {
+			logf("REDUCE ID: %d", work.WorkerID)
 			//type ReduceFunc func(key string, values <-chan string, output chan<- Pair) error
 			// Load each input file one at a time (copied from each map task)
 			for i:=0; i<work.M; i++ {
@@ -387,7 +403,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 				var file []byte
 				_, err = io.ReadFull(res.Body, file)
 				if err != nil {
-					failure("ioutil.ReadAll")
+					failure("io.ReadFull")
 					log.Fatal(err)
 				}
 				res.Body.Close()
@@ -402,7 +418,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 				}
 				_, err = f.Write(file)
 				if err != nil {
-					failure("file.WriteString")
+					failure("file.Write")
 					log.Fatal(err)
 				}
 			}
@@ -425,12 +441,16 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 		err = call(master, "Notify", req, &resp)
 		if err != nil {
 			failure("Notify")
+			tasks_run++
 			continue
 		}
 		if resp.Message == WORK_DONE {
 			log.Println("Finished Working")
 			break
 		}
+
+		tasks_run++
+
 	}
 
 	return nil
