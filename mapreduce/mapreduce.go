@@ -358,7 +358,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				go func() {
 					err = mapFunc(key, value, outChan)
 					if err != nil {
-						failure("map")
+						failure("mapFunc")
 						log.Println(err)
 						//return err
 					}
@@ -478,15 +478,56 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			}
 			defer rows.Close()
 
-			for rows.Next() {
-				var key string
-				var value string
-				rows.Scan(&key, &value)
-				fmt.Println(key, value)
-			}
+			var key string
+			var value string
+			rows.Next()
+			rows.Scan(&key, &value)
+
+			//type ReduceFunc func(key string, values <-chan string, output chan<- Pair) error
+			inChan := make(chan string)
+			outChan := make(chan Pair)
+			go func() {
+				err = reduceFunc(key, inChan, outChan)
+				if err != nil {
+					failure("reduceFunc")
+					log.Println(err)
+				}
+			}()
+			inChan <- value
+			current := key
+
+			var outputPairs []Pair
 			// Walk through the file's rows, performing the reduce func
-				// Basically you will call the reduce func for each key you have, sending each key/value for the current key across the input channel
-				// then closing the channel and calling the reduce func again for a different key
+			for rows.Next() {
+				rows.Scan(&key, &value)
+				if key == current {
+					inChan <- value
+				} else {
+					close(inChan)
+					p := <-outChan
+					outputPairs = append(outputPairs, p)
+
+					inChan = make(chan string)
+					outChan = make(chan Pair)
+					go func() {
+						err = reduceFunc(key, inChan, outChan)
+						if err != nil {
+							failure("reduceFunc")
+							log.Println(err)
+						}
+					}()
+					inChan <- value
+					current = key
+				}
+			}
+			close(inChan)
+			p := <-outChan
+			outputPairs = append(outputPairs, p)
+
+			// TODO: Output each pair to an output sql file
+			for _, op := range outputPairs {
+				fmt.Println(op)
+			}
 		} else {
 			log.Println("INVALID WORK TYPE")
 			var err error

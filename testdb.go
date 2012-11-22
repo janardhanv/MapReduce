@@ -43,7 +43,7 @@ func main() {
      *
 	 * select distinct key .....
 	 */
-	rows, err := db.Query("select key, value from data;",)
+	rows, err := db.Query("select key, value from data order by value asc;",)
 	if err != nil {
 		fmt.Println(err)
 		return
