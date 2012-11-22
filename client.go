@@ -60,9 +60,9 @@ func wordCountReducer(key string, values <-chan string, output chan<- mapreduce.
 			return err
 		}
 		count += i
-		p := mapreduce.Pair{Key: key, Value: strconv.Itoa(count)}
-		output <- p
 	}
+	p := mapreduce.Pair{Key: key, Value: strconv.Itoa(count)}
+	output <- p
 
 	return nil
 }

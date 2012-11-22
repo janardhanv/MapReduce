@@ -119,6 +119,7 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 }
 
 func (self *Master) Notify(request Request, response *Response) error {
+	// TODO: This function isn't really doing anything
 	work := request.Work
 	if request.Type == TYPE_MAP {
 		work.Type = TYPE_REDUCE
@@ -265,7 +266,7 @@ func StartMaster(config *Config) error {
  *
  * select distinct key .....
  */
-func StartWorker(m MapFunc, r ReduceFunc, master string) error {
+func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 	tasks_run := 0
 	for { //TODO: Should this be a for loop?
 		logf("===============================")
@@ -355,7 +356,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 				//type MapFunc func(key, value string, output chan<- Pair) error
 				outChan := make(chan Pair)
 				go func() {
-					err = m(key, value, outChan)
+					err = mapFunc(key, value, outChan)
 					if err != nil {
 						failure("map")
 						log.Println(err)
@@ -385,7 +386,6 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 			// Serve the files so each reducer can get them
 			// /tmp/map_output/%d/tmp_map_out_%d.sql
 			go func() {
-				// TODO: Serve this incrementally starting at port 4000
 				// (4000 + work.WorkerID)
 				//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
 				fileServer := http.FileServer(http.Dir("."))
@@ -456,17 +456,33 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 					var value string
 					rows.Scan(&key, &value)
 					sqls = append(sqls, fmt.Sprintf("insert into data values ('%s', '%s');", key, value))
-					fmt.Println(key, value)
 				}
 			}
 
-			agg_db, err := sql.Open("sqlite3", fmt.Sprintf("./reduce_aggregate_%d.sql", work.WorkerID))
-			defer agg_db.Close()
+			reduce_db, err := sql.Open("sqlite3", fmt.Sprintf("./reduce_aggregate_%d.sql", work.WorkerID))
 			for _, sql := range sqls {
-				_, err = agg_db.Exec(sql)
+				_, err = reduce_db.Exec(sql)
 				if err != nil {
 					fmt.Printf("%q: %s\n", err, sql)
 				}
+			}
+			reduce_db.Close()
+
+			reduce_db, err = sql.Open("sqlite3", fmt.Sprintf("./reduce_aggregate_%d.sql", work.WorkerID))
+			defer reduce_db.Close()
+			rows, err := reduce_db.Query("select key, value from data order by key asc;")
+			if err != nil {
+				log.Println(err)
+				failure("sql.Query")
+				return err
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var key string
+				var value string
+				rows.Scan(&key, &value)
+				fmt.Println(key, value)
 			}
 			// Walk through the file's rows, performing the reduce func
 				// Basically you will call the reduce func for each key you have, sending each key/value for the current key across the input channel
