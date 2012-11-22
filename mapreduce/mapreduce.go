@@ -13,7 +13,7 @@ import (
 	"database/sql"
 	_ "github.com/mattn/go-sqlite3"
 	"fmt"
-	"io"
+	//"io"
 	"log"
 	"math"
 	"math/big"
@@ -106,6 +106,8 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 	} else if self.ReduceCount < self.R { // REDUCE
 		response.Type = TYPE_REDUCE
 		var work Work
+		work.M = self.M
+		work.R = self.R
 		work.WorkerID = self.ReduceCount
 		self.ReduceCount = self.ReduceCount + 1
 		response.Work = work
@@ -326,7 +328,7 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 				reducer := big.NewInt(0)
 				reducer.Mod(hash(key), big.NewInt(int64(work.R)))
 				//db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64())) //TODO: Directories don't work
-				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("map_out_%d.sql", reducer.Int64()))
+				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("map_%d_out_%d.sql", work.WorkerID, reducer.Int64()))
 				defer db_tmp.Close()
 				if err != nil {
 					log.Println(err)
@@ -382,26 +384,29 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 
 			// Serve the files so each reducer can get them
 			// /tmp/map_output/%d/tmp_map_out_%d.sql
-			if tasks_run == 0 {
-				go func() {
-					// TODO: Serve this incrementally starting at port 4000
-					// (4000 + work.WorkerID)
-					//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
-					http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf(".", work.WorkerID))))
-				}()
-			}
+			go func() {
+				// TODO: Serve this incrementally starting at port 4000
+				// (4000 + work.WorkerID)
+				//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
+				fileServer := http.FileServer(http.Dir("."))
+				log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", 4000+work.WorkerID), fileServer))
+			}()
 		} else if resp.Type == TYPE_REDUCE {
 			logf("REDUCE ID: %d", work.WorkerID)
 			//type ReduceFunc func(key string, values <-chan string, output chan<- Pair) error
 			// Load each input file one at a time (copied from each map task)
+			var filenames []string
 			for i:=0; i<work.M; i++ {
-				res, err := http.Get(fmt.Sprintf("localhost:%d/tmp/map_output/%d/map_out_%d.sql", 4000+i, i, work.WorkerID))
+				//res, err := http.Get(fmt.Sprintf("%d:/tmp/map_output/%d/map_out_%d.sql", 4000+i, i, work.WorkerID)) //TODO: Directories don't work
+				res, err := http.Get(fmt.Sprintf("http://localhost:%d/map_%d_out_%d.sql", 4000+i, i, work.WorkerID))
 				if err != nil {
 					failure("http.Get")
 					log.Fatal(err)
 				}
-				var file []byte
-				_, err = io.ReadFull(res.Body, file)
+
+				file := make([]byte, 5000)
+				bytes, err := res.Body.Read(file)
+				log.Printf("%d bytes read from file", bytes)
 				if err != nil {
 					failure("io.ReadFull")
 					log.Fatal(err)
@@ -409,21 +414,60 @@ func StartWorker(m MapFunc, r ReduceFunc, master string) error {
 				res.Body.Close()
 
 				// Open the output file using the os package and use io.Copy to get the full contents.
-				// fmt.Printf("%s", file)
-				f, err := os.Create(fmt.Sprintf("map_out_%d_mapper_%d.sql", work.WorkerID, i))
+				filename := fmt.Sprintf("map_out_%d_mapper_%d.sql", work.WorkerID, i)
+				f, err := os.Create(filename)
+				filenames = append(filenames, filename)
 				defer f.Close()
 				if err != nil {
 					failure("os.Create")
 					log.Fatal(err)
 				}
-				_, err = f.Write(file)
+				bytes, err = f.Write(file)
+				log.Printf("%d bytes written to file %s", bytes, filename)
 				if err != nil {
 					failure("file.Write")
 					log.Fatal(err)
 				}
 			}
-			// TODO: Combine all the rows into a single input file
 
+			// Combine all the rows into a single input file
+			sqls := []string{
+				"create table if not exists data (key text not null, value text not null)",
+				"create index if not exists data_key on data (key asc, value asc);",
+			}
+
+			for _, file := range filenames {
+				db, err := sql.Open("sqlite3", file)
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+				defer db.Close()
+
+				rows, err := db.Query("select key, value from data;",)
+				if err != nil {
+					fmt.Println(err)
+					continue
+				}
+				defer rows.Close()
+
+				for rows.Next() {
+					var key string
+					var value string
+					rows.Scan(&key, &value)
+					sqls = append(sqls, fmt.Sprintf("insert into data values ('%s', '%s');", key, value))
+					fmt.Println(key, value)
+				}
+			}
+
+			agg_db, err := sql.Open("sqlite3", fmt.Sprintf("./reduce_aggregate_%d.sql", work.WorkerID))
+			defer agg_db.Close()
+			for _, sql := range sqls {
+				_, err = agg_db.Exec(sql)
+				if err != nil {
+					fmt.Printf("%q: %s\n", err, sql)
+				}
+			}
 			// Walk through the file's rows, performing the reduce func
 				// Basically you will call the reduce func for each key you have, sending each key/value for the current key across the input channel
 				// then closing the channel and calling the reduce func again for a different key

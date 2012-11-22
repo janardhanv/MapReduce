@@ -60,6 +60,18 @@ func main() {
 		"insert into data values ('2red', 'snake');",
 		"insert into data values ('2blue', 'chicken');",
 		"insert into data values ('2blue', 'falcon');",
+		"insert into data values ('3green', 'lizard');",
+		"insert into data values ('3red', 'snake');",
+		"insert into data values ('3blue', 'chicken');",
+		"insert into data values ('3blue', 'falcon');",
+		"insert into data values ('4green', 'rabbit');",
+		"insert into data values ('4red', 'snake');",
+		"insert into data values ('4blue', 'rabbit');",
+		"insert into data values ('4blue', 'falcon');",
+		"insert into data values ('5green', 'lizard');",
+		"insert into data values ('5red', 'rabbit');",
+		"insert into data values ('5blue', 'chicken');",
+		"insert into data values ('5blue', 'falcon');",
 	 }
 
 	 for _, sql := range sqls {
