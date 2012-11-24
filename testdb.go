@@ -43,7 +43,9 @@ func main() {
      *
 	 * select distinct key .....
 	 */
-	rows, err := db.Query("select key, value from data order by value asc;",)
+	fmt.Println("\nORDER BY KEY")
+	fmt.Println("==============================")
+	rows, err := db.Query("select key, value from data order by key asc;",)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -57,5 +59,20 @@ func main() {
 		fmt.Println(key, value)
 	}
 
+	fmt.Println("\nORDER BY VALUE")
+	fmt.Println("==============================")
+	rows, err = db.Query("select key, value from data order by value asc;",)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key string
+		var value string
+		rows.Scan(&key, &value)
+		fmt.Println(key, value)
+	}
 }
 

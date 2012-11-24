@@ -47,10 +47,8 @@ type Config struct {
 	R int
 }
 
-
 type MapFunc func(key, value string, output chan<- Pair) error
 type ReduceFunc func(key string, values <-chan string, output chan<- Pair) error
-
 
 type Request struct {
 	Message string
@@ -83,6 +81,9 @@ type Master struct {
 	R int
 	Maps []Work
 	ReduceCount int
+	WorkDone int
+	DoneChan chan int
+	Merged bool
 }
 
 type Work struct {
@@ -119,17 +120,148 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 }
 
 func (self *Master) Notify(request Request, response *Response) error {
-	// TODO: This function isn't really doing anything
-	work := request.Work
 	if request.Type == TYPE_MAP {
-		work.Type = TYPE_REDUCE
-		work.WorkerID = 0 // Maybe?
+		fmt.Println("MAP DONE")
 	} else if request.Type == TYPE_REDUCE {
-		// TODO: What do I do when a reducer is done?
+		fmt.Println("REDUCE DONE")
+		self.WorkDone++
+		if self.WorkDone >= self.R {
+			response.Message = WORK_DONE
+			self.DoneChan <- 1
+		}
 	} else {
 		log.Println("INVALID TYPE")
 	}
 
+	return nil
+}
+
+func Merge(R int, reduceFunc ReduceFunc) error {
+	// Combine all the rows into a single input file
+	sqls := []string{
+		"create table if not exists data (key text not null, value text not null)",
+		"create index if not exists data_key on data (key asc, value asc);",
+	}
+	for i:=0; i<R; i++ {
+		db, err := sql.Open("sqlite3", fmt.Sprintf("reduce_out_%d.sql", i))
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		defer db.Close()
+
+		rows, err := db.Query("select key, value from data;",)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var key string
+			var value string
+			rows.Scan(&key, &value)
+			sqls = append(sqls, fmt.Sprintf("insert into data values ('%s', '%s');", key, value))
+		}
+	}
+	fmt.Println(sqls)
+
+	agg_db, err := sql.Open("sqlite3", "./aggregate.sql")
+	for _, sql := range sqls {
+		_, err = agg_db.Exec(sql)
+		if err != nil {
+			fmt.Printf("%q: %s\n", err, sql)
+		}
+	}
+	agg_db.Close()
+
+	agg_db, err = sql.Open("sqlite3", ("./aggregate.sql"))
+	defer agg_db.Close()
+	rows, err := agg_db.Query("select key, value from data order by key asc;")
+	if err != nil {
+		log.Println(err)
+		failure("sql.Query")
+		return err
+	}
+	defer rows.Close()
+
+	var key string
+	var value string
+	rows.Next()
+	rows.Scan(&key, &value)
+
+	//type ReduceFunc func(key string, values <-chan string, output chan<- Pair) error
+	inChan := make(chan string)
+	outChan := make(chan Pair)
+	go func() {
+		err = reduceFunc(key, inChan, outChan)
+		if err != nil {
+			failure("reduceFunc")
+			log.Println(err)
+		}
+	}()
+	inChan <- value
+	current := key
+
+	var outputPairs []Pair
+	// Walk through the file's rows, performing the reduce func
+	for rows.Next() {
+		rows.Scan(&key, &value)
+		if key == current {
+			inChan <- value
+		} else {
+			close(inChan)
+			p := <-outChan
+			outputPairs = append(outputPairs, p)
+
+			inChan = make(chan string)
+			outChan = make(chan Pair)
+			go func() {
+				err = reduceFunc(key, inChan, outChan)
+				if err != nil {
+					failure("reduceFunc")
+					log.Println(err)
+				}
+			}()
+			inChan <- value
+			current = key
+		}
+	}
+	close(inChan)
+	p := <-outChan
+	outputPairs = append(outputPairs, p)
+
+	// Prepare tmp database
+	db_out, err := sql.Open("sqlite3", "output.sql")
+	defer db_out.Close()
+	if err != nil {
+		log.Println(err)
+		failure("sql.Open - output.sql")
+		return err
+	}
+	sqls = []string{
+		"create table if not exists data (key text not null, value text not null)",
+		"create index if not exists data_key on data (key asc, value asc);",
+	}
+	for _, sql := range sqls {
+		_, err = db_out.Exec(sql)
+		if err != nil {
+			failure("sql.Exec")
+			fmt.Printf("%q: %s\n", err, sql)
+			return err
+		}
+	}
+
+	// Write the data locally
+	for _, op := range outputPairs {
+		sql := fmt.Sprintf("insert into data values ('%s', '%s');", op.Key, op.Value)
+		_, err = db_out.Exec(sql)
+		if err != nil {
+			failure("sql.Exec")
+			fmt.Printf("%q: %s\n", err, sql)
+			return err
+		}
+	}
 	return nil
 }
 
@@ -187,7 +319,7 @@ func StartMaster(config *Config) error {
 	// Config variables
 	master := config.Master
 	input := config.InputData
-	//output := config.Output //TODO: Not important to do now
+	//output := config.Output //TODO: Directories don't work
 	m := config.M
 	r := config.R
 
@@ -232,6 +364,7 @@ func StartMaster(config *Config) error {
 	me.M = m
 	me.R = r
 	me.ReduceCount = 0
+	me.DoneChan = make(chan int)
 // TODO: The following 4 might not be necessary
 /*
 	me.Offset = 0
@@ -251,11 +384,9 @@ func StartMaster(config *Config) error {
 			os.Exit(1)
 		}
 	}()
-	for {
-		// TODO: What do I do now?
-		time.Sleep(1e9)
-		fmt.Print(".")
-	}
+
+	<-me.DoneChan
+	time.Sleep(5e9)
 
 	return nil
 }
@@ -524,9 +655,36 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			p := <-outChan
 			outputPairs = append(outputPairs, p)
 
-			// TODO: Output each pair to an output sql file
+			// Prepare tmp database
+			db_out, err := sql.Open("sqlite3", fmt.Sprintf("reduce_out_%d.sql", work.WorkerID))
+			defer db_out.Close()
+			if err != nil {
+				log.Println(err)
+				failure(fmt.Sprintf("sql.Open - reduce_out_%d.sql", work.WorkerID))
+				return err
+			}
+			sqls = []string{
+				"create table if not exists data (key text not null, value text not null)",
+				"create index if not exists data_key on data (key asc, value asc);",
+			}
+			for _, sql := range sqls {
+				_, err = db_out.Exec(sql)
+				if err != nil {
+					failure("sql.Exec")
+					fmt.Printf("%q: %s\n", err, sql)
+					return err
+				}
+			}
+
+			// Write the data locally
 			for _, op := range outputPairs {
-				fmt.Println(op)
+				sql := fmt.Sprintf("insert into data values ('%s', '%s');", op.Key, op.Value)
+				_, err = db_out.Exec(sql)
+				if err != nil {
+					failure("sql.Exec")
+					fmt.Printf("%q: %s\n", err, sql)
+					return err
+				}
 			}
 		} else {
 			log.Println("INVALID WORK TYPE")
@@ -538,7 +696,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 		 * Notify the master when I'm done
 		 */
 
-		//TODO: send the location of my output data over to Notify
+		req.Type = resp.Type
 		err = call(master, "Notify", req, &resp)
 		if err != nil {
 			failure("Notify")

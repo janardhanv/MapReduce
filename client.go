@@ -90,6 +90,10 @@ func main() {
 		if err != nil {
 			log.Println(err)
 		}
+		err = mapreduce.Merge(r, wordCountReducer)
+		if err != nil {
+			log.Println(err)
+		}
 	} else {
 		logf("Worker - Master Location: %s", master)
 		//err := mapreduce.StartWorker(mapreduce.MapFunc(identityMapper), mapreduce.ReduceFunc(identityReducer), master)
