@@ -68,12 +68,13 @@ func wordCountReducer(key string, values <-chan string, output chan<- mapreduce.
 }
 
 func main() {
-	var input, master, output string
+	var input, master, output, table string
 	var m, r int
 	var ismaster bool
 	flag.BoolVar(&ismaster, "ismaster", false, "True for master, false for worker.")
 	flag.StringVar(&master, "master", "localhost:3410", "The location of the master.")
 	flag.StringVar(&input, "inputdata", "./db.sql", "The data set to load from file.")
+	flag.StringVar(&table, "table", "data", "The name of the table in the database.")
 	flag.StringVar(&output, "output", "output", "Where to save the output.")
 	flag.IntVar(&m, "m", 1, "The number of map tasks to run.")
 	flag.IntVar(&r, "r", 1, "The number of reduce tasks to run.")
@@ -86,6 +87,7 @@ func main() {
 		config.Output = output
 		config.M = m
 		config.R = r
+		config.Table = table
 		err := mapreduce.StartMaster(&config)
 		if err != nil {
 			log.Println(err)

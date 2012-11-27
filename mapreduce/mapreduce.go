@@ -13,7 +13,7 @@ import (
 	"database/sql"
 	_ "github.com/mattn/go-sqlite3"
 	"fmt"
-	//"io"
+	//"io/ioutil"
 	"log"
 	"math"
 	"math/big"
@@ -27,6 +27,7 @@ const (
 	WORK_DONE	= "1"
 	WORK_MAP	= "2"
 	WORK_REDUCE = "3"
+	WAIT = "4"
 )
 
 const (
@@ -45,6 +46,7 @@ type Config struct {
 	Output string
 	M int
 	R int
+	Table string
 }
 
 type MapFunc func(key, value string, output chan<- Pair) error
@@ -80,10 +82,12 @@ type Master struct {
 	M int
 	R int
 	Maps []Work
+	MapDoneCount int
 	ReduceCount int
 	WorkDone int
 	DoneChan chan int
 	Merged bool
+	Table string
 }
 
 type Work struct {
@@ -94,24 +98,30 @@ type Work struct {
 	Size int
 	M int
 	R int
+	Table string
 }
 
 func (self *Master) GetWork(_ Request, response *Response) error {
 	if len(self.Maps) > 0 { // MAP
 		response.Type = TYPE_MAP
 		work := self.Maps[0]
+		work.Table = self.Table
 		work.M = self.M
 		work.R = self.R
 		response.Work = work
 		self.Maps = self.Maps[1:]
 	} else if self.ReduceCount < self.R { // REDUCE
-		response.Type = TYPE_REDUCE
-		var work Work
-		work.M = self.M
-		work.R = self.R
-		work.WorkerID = self.ReduceCount
-		self.ReduceCount = self.ReduceCount + 1
-		response.Work = work
+		if self.MapDoneCount >= self.M {
+			response.Type = TYPE_REDUCE
+			var work Work
+			work.M = self.M
+			work.R = self.R
+			work.WorkerID = self.ReduceCount
+			self.ReduceCount = self.ReduceCount + 1
+			response.Work = work
+		} else {
+			response.Message = WAIT
+		}
 	} else { // DONE
 		response.Message = WORK_DONE
 	}
@@ -122,6 +132,7 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 func (self *Master) Notify(request Request, response *Response) error {
 	if request.Type == TYPE_MAP {
 		fmt.Println("MAP DONE")
+		self.MapDoneCount++
 	} else if request.Type == TYPE_REDUCE {
 		fmt.Println("REDUCE DONE")
 		self.WorkDone++
@@ -164,7 +175,6 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 			sqls = append(sqls, fmt.Sprintf("insert into data values ('%s', '%s');", key, value))
 		}
 	}
-	fmt.Println(sqls)
 
 	agg_db, err := sql.Open("sqlite3", "./aggregate.sql")
 	for _, sql := range sqls {
@@ -180,7 +190,7 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 	rows, err := agg_db.Query("select key, value from data order by key asc;")
 	if err != nil {
 		log.Println(err)
-		failure("sql.Query")
+		failure("sql.Query3")
 		return err
 	}
 	defer rows.Close()
@@ -246,7 +256,7 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 	for _, sql := range sqls {
 		_, err = db_out.Exec(sql)
 		if err != nil {
-			failure("sql.Exec")
+			failure("sql.Exec1")
 			fmt.Printf("%q: %s\n", err, sql)
 			return err
 		}
@@ -257,7 +267,7 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 		sql := fmt.Sprintf("insert into data values ('%s', '%s');", op.Key, op.Value)
 		_, err = db_out.Exec(sql)
 		if err != nil {
-			failure("sql.Exec")
+			failure("sql.Exec2")
 			fmt.Printf("%q: %s\n", err, sql)
 			return err
 		}
@@ -319,6 +329,7 @@ func StartMaster(config *Config) error {
 	// Config variables
 	master := config.Master
 	input := config.InputData
+	table := config.Table
 	//output := config.Output //TODO: Directories don't work
 	m := config.M
 	r := config.R
@@ -333,9 +344,9 @@ func StartMaster(config *Config) error {
 	defer db.Close()
 
 	// Count the work to be done
-	query, err := db.Query("select count(*) from data;")
+	query, err := db.Query(fmt.Sprintf("select count(*) from %s;", table))
 	if err != nil {
-		failure("sql.Query")
+		failure("sql.Query4")
 		log.Println(err)
 		return err
 	}
@@ -365,6 +376,7 @@ func StartMaster(config *Config) error {
 	me.R = r
 	me.ReduceCount = 0
 	me.DoneChan = make(chan int)
+	me.Table = table
 // TODO: The following 4 might not be necessary
 /*
 	me.Offset = 0
@@ -419,6 +431,18 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			log.Println("Finished Working")
 			break
 		}
+		for resp.Message == WAIT {
+			err = call(master, "GetWork", req, &resp)
+			if err != nil {
+				failure("GetWork")
+				tasks_run++
+				continue
+			}
+			if resp.Message == WORK_DONE {
+				log.Println("Finished Working")
+				break
+			}
+		}
 		work := resp.Work
 
 		/*
@@ -432,6 +456,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 
 		if resp.Type == TYPE_MAP {
 			logf("MAP ID: %d", work.WorkerID)
+			log.Print("Running Map function on input data...")
 			// Load data
 			db, err := sql.Open("sqlite3", work.Filename)
 			if err != nil {
@@ -442,10 +467,10 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			defer db.Close()
 
 			// Query
-			rows, err := db.Query(fmt.Sprintf("select key, value from data limit %d offset %d;", work.Size, work.Offset))
+			rows, err := db.Query(fmt.Sprintf("select key, value from %s limit %d offset %d;", work.Table, work.Size, work.Offset))
 			if err != nil {
 				log.Println(err)
-				failure("sql.Query")
+				failure("sql.Query1")
 				return err
 			}
 			defer rows.Close()
@@ -461,7 +486,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				reducer.Mod(hash(key), big.NewInt(int64(work.R)))
 				//db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64())) //TODO: Directories don't work
 				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("map_%d_out_%d.sql", work.WorkerID, reducer.Int64()))
-				defer db_tmp.Close()
+				//defer db_tmp.Close() //TODO
 				if err != nil {
 					log.Println(err)
 					failure(fmt.Sprintf("sql.Open - /tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64()))
@@ -477,7 +502,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				for _, sql := range sqls {
 					_, err = db_tmp.Exec(sql)
 					if err != nil {
-						failure("sql.Exec")
+						failure("sql.Exec3")
 						fmt.Printf("%q: %s\n", err, sql)
 						return err
 					}
@@ -505,13 +530,16 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 					sql := fmt.Sprintf("insert into data values ('%s', '%s');", key, value)
 					_, err = db_tmp.Exec(sql)
 					if err != nil {
-						failure("sql.Exec")
-						fmt.Printf("%q: %s\n", err, sql)
+						failure("sql.Exec4")
+						fmt.Printf("map_%d_out_%d.sql\n", work.WorkerID, reducer.Int64())
+						fmt.Println(key, value)
+						log.Printf("%q: %s\n", err, sql)
 						return err
 					}
 					//log.Println(key, value)
 					pair = <-outChan
 				}
+				db_tmp.Close() //TODO
 			}
 
 			// Serve the files so each reducer can get them
@@ -519,8 +547,11 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			go func() {
 				// (4000 + work.WorkerID)
 				//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
+				//fileServer := http.FileServer(http.Dir("/Homework/3410/mapreduce/"))
 				fileServer := http.FileServer(http.Dir("."))
-				log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", 4000+work.WorkerID), fileServer))
+				port := fmt.Sprintf(":%d", 4000+work.WorkerID)
+				log.Println("Listening on " + port)
+				log.Fatal(http.ListenAndServe(port, fileServer))
 			}()
 		} else if resp.Type == TYPE_REDUCE {
 			logf("REDUCE ID: %d", work.WorkerID)
@@ -529,13 +560,14 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			var filenames []string
 			for i:=0; i<work.M; i++ {
 				//res, err := http.Get(fmt.Sprintf("%d:/tmp/map_output/%d/map_out_%d.sql", 4000+i, i, work.WorkerID)) //TODO: Directories don't work
-				res, err := http.Get(fmt.Sprintf("http://localhost:%d/map_%d_out_%d.sql", 4000+i, i, work.WorkerID))
+				map_file := fmt.Sprintf("http://localhost:%d/map_%d_out_%d.sql", 4000+i, i, work.WorkerID)
+				res, err := http.Get(map_file)
 				if err != nil {
 					failure("http.Get")
 					log.Fatal(err)
 				}
 
-				file := make([]byte, 5000)
+				file := make([]byte, res.ContentLength)
 				bytes, err := res.Body.Read(file)
 				log.Printf("%d bytes read from file", bytes)
 				if err != nil {
@@ -544,7 +576,6 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				}
 				res.Body.Close()
 
-				// Open the output file using the os package and use io.Copy to get the full contents.
 				filename := fmt.Sprintf("map_out_%d_mapper_%d.sql", work.WorkerID, i)
 				f, err := os.Create(filename)
 				filenames = append(filenames, filename)
@@ -604,7 +635,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			rows, err := reduce_db.Query("select key, value from data order by key asc;")
 			if err != nil {
 				log.Println(err)
-				failure("sql.Query")
+				failure("sql.Query2")
 				return err
 			}
 			defer rows.Close()
@@ -670,7 +701,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			for _, sql := range sqls {
 				_, err = db_out.Exec(sql)
 				if err != nil {
-					failure("sql.Exec")
+					failure("sql.Exec5")
 					fmt.Printf("%q: %s\n", err, sql)
 					return err
 				}
@@ -681,7 +712,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				sql := fmt.Sprintf("insert into data values ('%s', '%s');", op.Key, op.Value)
 				_, err = db_out.Exec(sql)
 				if err != nil {
-					failure("sql.Exec")
+					failure("sql.Exec6")
 					fmt.Printf("%q: %s\n", err, sql)
 					return err
 				}
