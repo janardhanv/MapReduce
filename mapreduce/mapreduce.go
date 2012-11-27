@@ -13,7 +13,7 @@ import (
 	"database/sql"
 	_ "github.com/mattn/go-sqlite3"
 	"fmt"
-	//"io/ioutil"
+	"io/ioutil"
 	"log"
 	"math"
 	"math/big"
@@ -121,6 +121,7 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 			response.Work = work
 		} else {
 			response.Message = WAIT
+			return nil
 		}
 	} else { // DONE
 		response.Message = WORK_DONE
@@ -567,25 +568,17 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 					log.Fatal(err)
 				}
 
-				file := make([]byte, res.ContentLength)
-				bytes, err := res.Body.Read(file)
-				log.Printf("%d bytes read from file", bytes)
+				file, err := ioutil.ReadAll(res.Body)
+				res.Body.Close()
 				if err != nil {
-					failure("io.ReadFull")
+					failure("ioutil.ReadAll")
 					log.Fatal(err)
 				}
-				res.Body.Close()
 
 				filename := fmt.Sprintf("map_out_%d_mapper_%d.sql", work.WorkerID, i)
-				f, err := os.Create(filename)
 				filenames = append(filenames, filename)
-				defer f.Close()
-				if err != nil {
-					failure("os.Create")
-					log.Fatal(err)
-				}
-				bytes, err = f.Write(file)
-				log.Printf("%d bytes written to file %s", bytes, filename)
+
+				err = ioutil.WriteFile(filename, file, 0777)
 				if err != nil {
 					failure("file.Write")
 					log.Fatal(err)
