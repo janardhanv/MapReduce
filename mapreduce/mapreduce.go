@@ -119,6 +119,7 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 			work.WorkerID = self.ReduceCount
 			self.ReduceCount = self.ReduceCount + 1
 			response.Work = work
+			return nil
 		} else {
 			response.Message = WAIT
 			return nil
@@ -147,6 +148,22 @@ func (self *Master) Notify(request Request, response *Response) error {
 
 	return nil
 }
+
+	/*
+func CleanUp(M int, R int) error {
+	os.Remove("aggregate.sql")
+	for r:=0; r<R; r++ {
+		for m:=0; m<M; m++ {
+			os.Remove(fmt.Sprintf("map_%d_out_%d.sql", m, r))
+			os.Remove(fmt.Sprintf("map_out_%d_mapper_%d.sql", r, m))
+		}
+		os.Remove(fmt.Sprintf("reduce_aggregate_%d.sql", r))
+		os.Remove(fmt.Sprintf("reduce_out_%d.sql", r))
+	}
+	return nil
+
+}
+	*/
 
 func Merge(R int, reduceFunc ReduceFunc) error {
 	// Combine all the rows into a single input file
@@ -429,7 +446,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			continue
 		}
 		if resp.Message == WORK_DONE {
-			log.Println("Finished Working")
+			log.Println("GetWork - Finished Working")
 			break
 		}
 		for resp.Message == WAIT {
@@ -440,7 +457,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				continue
 			}
 			if resp.Message == WORK_DONE {
-				log.Println("Finished Working")
+				log.Println("GetWork - Finished Working")
 				break
 			}
 		}
@@ -728,8 +745,17 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			continue
 		}
 		if resp.Message == WORK_DONE {
-			log.Println("Finished Working")
-			break
+			log.Println("Notified - Finished Working")
+			//CleanUp(m, r)
+			os.Remove("aggregate.sql")
+			for r:=0; r<work.R; r++ {
+				for m:=0; m<work.M; m++ {
+					os.Remove(fmt.Sprintf("map_%d_out_%d.sql", m, r))
+					os.Remove(fmt.Sprintf("map_out_%d_mapper_%d.sql", r, m))
+				}
+				os.Remove(fmt.Sprintf("reduce_aggregate_%d.sql", r))
+			}
+			return nil
 		}
 
 		tasks_run++
