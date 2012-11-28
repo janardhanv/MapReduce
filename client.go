@@ -96,6 +96,7 @@ func main() {
 		if err != nil {
 			log.Println(err)
 		}
+		log.Println("Task Completed")
 	} else {
 		logf("Worker - Master Location: %s", master)
 		//err := mapreduce.StartWorker(mapreduce.MapFunc(identityMapper), mapreduce.ReduceFunc(identityReducer), master)
