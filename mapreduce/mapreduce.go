@@ -34,6 +34,8 @@ const (
 const (
 	TYPE_MAP = iota
 	TYPE_REDUCE
+	TYPE_DONE
+	TYPE_WAIT
 )
 
 type Pair struct {
@@ -73,16 +75,10 @@ type Response struct {
 
 type Master struct {
 	Address string
-// TODO: The following 4 might not be necessary
-/*
-	Database string
-	Offset int
-	Chunksize int
-	Count int
-*/
 	M int
 	R int
 	Maps []Work
+	MapAddresses []string
 	MapDoneCount int
 	ReduceCount int
 	WorkDone int
@@ -100,10 +96,12 @@ type Work struct {
 	M int
 	R int
 	Table string
+	MapAddresses []string
 }
 
 func (self *Master) GetWork(_ Request, response *Response) error {
 	if len(self.Maps) > 0 { // MAP
+		log.Println("Assigning MAP work")
 		response.Type = TYPE_MAP
 		work := self.Maps[0]
 		work.Table = self.Table
@@ -113,20 +111,23 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 		self.Maps = self.Maps[1:]
 	} else if self.ReduceCount < self.R { // REDUCE
 		if self.MapDoneCount >= self.M {
+			log.Println("Assigning REDUCE work")
 			response.Type = TYPE_REDUCE
 			var work Work
 			work.M = self.M
 			work.R = self.R
 			work.WorkerID = self.ReduceCount
+			work.MapAddresses = self.MapAddresses
 			self.ReduceCount = self.ReduceCount + 1
 			response.Work = work
 			return nil
 		} else {
-			response.Message = WAIT
+			response.Type = TYPE_WAIT
 			return nil
 		}
 	} else { // DONE
-		response.Message = WORK_DONE
+		log.Println("Cannot assign.  No more work to be done.")
+		response.Type = TYPE_DONE
 	}
 
 	return nil
@@ -134,17 +135,18 @@ func (self *Master) GetWork(_ Request, response *Response) error {
 
 func (self *Master) Notify(request Request, response *Response) error {
 	if request.Type == TYPE_MAP {
-		fmt.Println("MAP DONE")
+		log.Println("MAP DONE")
+		self.MapAddresses = append(self.MapAddresses, request.Address)
 		self.MapDoneCount++
 	} else if request.Type == TYPE_REDUCE {
-		fmt.Println("REDUCE DONE")
+		log.Println("REDUCE DONE")
 		self.WorkDone++
 		if self.WorkDone >= self.R {
 			response.Message = WORK_DONE
 			self.DoneChan <- 1
 		}
 	} else {
-		log.Println("INVALID TYPE")
+		response.Message = WORK_DONE
 	}
 
 	return nil
@@ -371,7 +373,7 @@ func GetLocalAddress() string {
 		panic("init: failed to find non-loopback interface with valid address on this node")
 	}
 
-	return net.JoinHostPort(localaddress, "3410")
+	return localaddress
 }
 
 /*
@@ -431,13 +433,6 @@ func StartMaster(config *Config) error {
 	me.ReduceCount = 0
 	me.DoneChan = make(chan int)
 	me.Table = table
-// TODO: The following 4 might not be necessary
-/*
-	me.Offset = 0
-	me.Database = input
-	me.Count = count
-	me.Chunksize = chunksize
-*/
 
 	rpc.Register(me)
 	rpc.HandleHTTP()
@@ -465,7 +460,7 @@ func StartMaster(config *Config) error {
  */
 func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 	tasks_run := 0
-	for { //TODO: Should this be a for loop?
+	for {
 		logf("===============================")
 		logf("       Starting new task.")
 		logf("===============================")
@@ -481,23 +476,30 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			tasks_run++
 			continue
 		}
+		/*
 		if resp.Message == WORK_DONE {
 			log.Println("GetWork - Finished Working")
+			resp.Type =
 			break
 		}
-		for resp.Message == WAIT {
+		*/
+		//for resp.Message == WAIT {
+		for resp.Type == TYPE_WAIT {
 			err = call(master, "GetWork", req, &resp)
 			if err != nil {
 				failure("GetWork")
 				tasks_run++
 				continue
 			}
+			/*
 			if resp.Message == WORK_DONE {
 				log.Println("GetWork - Finished Working")
 				break
 			}
+			*/
 		}
 		work := resp.Work
+		var myAddress string
 
 		/*
 		 * Do work
@@ -540,7 +542,6 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				reducer.Mod(hash(key), big.NewInt(int64(work.R)))
 				//db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64())) //TODO: Directories don't work
 				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("map_%d_out_%d.sql", work.WorkerID, reducer.Int64()))
-				//defer db_tmp.Close() //TODO
 				if err != nil {
 					log.Println(err)
 					failure(fmt.Sprintf("sql.Open - /tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64()))
@@ -593,28 +594,30 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 					//log.Println(key, value)
 					pair = <-outChan
 				}
-				db_tmp.Close() //TODO
+				db_tmp.Close()
 			}
 
+			myAddress = net.JoinHostPort(GetLocalAddress(), fmt.Sprintf("%d", 4000+work.WorkerID))
 			// Serve the files so each reducer can get them
 			// /tmp/map_output/%d/tmp_map_out_%d.sql
-			go func() {
+			go func(address string) {
 				// (4000 + work.WorkerID)
 				//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
 				//fileServer := http.FileServer(http.Dir("/Homework/3410/mapreduce/"))
 				fileServer := http.FileServer(http.Dir("."))
-				port := fmt.Sprintf(":%d", 4000+work.WorkerID)
-				log.Println("Listening on " + port)
-				log.Fatal(http.ListenAndServe(port, fileServer))
-			}()
+				log.Println("Listening on " + address)
+				log.Fatal(http.ListenAndServe(address, fileServer))
+			}(myAddress)
 		} else if resp.Type == TYPE_REDUCE {
 			logf("REDUCE ID: %d", work.WorkerID)
 			//type ReduceFunc func(key string, values <-chan string, output chan<- Pair) error
 			// Load each input file one at a time (copied from each map task)
 			var filenames []string
-			for i:=0; i<work.M; i++ {
+			for i, mapper := range work.MapAddresses {
 				//res, err := http.Get(fmt.Sprintf("%d:/tmp/map_output/%d/map_out_%d.sql", 4000+i, i, work.WorkerID)) //TODO: Directories don't work
-				map_file := fmt.Sprintf("http://localhost:%d/map_%d_out_%d.sql", 4000+i, i, work.WorkerID)
+				//map_file := fmt.Sprintf("http://localhost:%d/map_%d_out_%d.sql", 4000+i, i, work.WorkerID)
+				map_file := fmt.Sprintf("http://%s/map_%d_out_%d.sql", mapper, i, work.WorkerID)
+
 				res, err := http.Get(map_file)
 				if err != nil {
 					failure("http.Get")
@@ -763,23 +766,28 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 					return err
 				}
 			}
+		} else if resp.Type == TYPE_DONE {
 		} else {
 			log.Println("INVALID WORK TYPE")
 			var err error
 			return err
 		}
 
+
+
 		/*
 		 * Notify the master when I'm done
 		 */
 
 		req.Type = resp.Type
+		req.Address = myAddress
 		err = call(master, "Notify", req, &resp)
 		if err != nil {
 			failure("Notify")
 			tasks_run++
 			continue
 		}
+
 		if resp.Message == WORK_DONE {
 			log.Println("Notified - Finished Working")
 			//CleanUp(m, r)
@@ -793,7 +801,6 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			}
 			return nil
 		}
-
 		tasks_run++
 
 	}

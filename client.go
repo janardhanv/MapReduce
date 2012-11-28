@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"./mapreduce"
+	"net"
 	"strconv"
 	"strings"
 	"unicode"
@@ -80,7 +81,7 @@ func main() {
 	flag.IntVar(&r, "r", 1, "The number of reduce tasks to run.")
 	flag.Parse()
 	if ismaster {
-		master = mapreduce.GetLocalAddress()
+		master = net.JoinHostPort(mapreduce.GetLocalAddress(), "3410")
 		logf("Master - File: %s, Maps: %d, Reduces: %d, Location: %s", input, m, r, master)
 		var config mapreduce.Config
 		config.Master = master
