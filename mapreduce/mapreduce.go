@@ -17,6 +17,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	"net"
 	"net/http"
 	"net/rpc"
 	"os"
@@ -336,6 +337,41 @@ func hash(elt string) *big.Int {
 	hasher := sha1.New()
 	hasher.Write([]byte(elt))
 	return new(big.Int).SetBytes(hasher.Sum(nil))
+}
+
+func GetLocalAddress() string {
+	var localaddress string
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+			panic("init: failed to find network interfaces")
+	}
+
+	// find the first non-loopback interface with an IP address
+	for _, elt :=  range ifaces {
+		if elt.Flags&net.FlagLoopback == 0 && elt.Flags&net.FlagUp != 0 {
+			addrs, err := elt.Addrs()
+			if err != nil {
+				panic("init: failed to get addresses for network interfaces")
+			}
+			for _, a := range addrs {
+				ip, _, err := net.ParseCIDR(a.String())
+				if err != nil {
+					panic("init: failed to parse address for network interface")
+				}
+				ip4 := ip.To4()
+				if ip4 != nil {
+					localaddress = ip.String()
+					break
+				}
+			}
+		}
+	}
+	if localaddress == "" {
+		panic("init: failed to find non-loopback interface with valid address on this node")
+	}
+
+	return net.JoinHostPort(localaddress, "3410")
 }
 
 /*

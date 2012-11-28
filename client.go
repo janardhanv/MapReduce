@@ -80,7 +80,8 @@ func main() {
 	flag.IntVar(&r, "r", 1, "The number of reduce tasks to run.")
 	flag.Parse()
 	if ismaster {
-		logf("Master - File: %s, Maps: %d, Reduces: %d", input, m, r)
+		master = mapreduce.GetLocalAddress()
+		logf("Master - File: %s, Maps: %d, Reduces: %d, Location: %s", input, m, r, master)
 		var config mapreduce.Config
 		config.Master = master
 		config.InputData = input
