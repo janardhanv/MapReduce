@@ -381,7 +381,7 @@ func GetLocalAddress() string {
  * select count(*) from data;
  * // Divide the count up among the number of mappers
  */
-func StartMaster(config *Config) error {
+func StartMaster(config *Config, reduceFunc ReduceFunc) error {
 	// Config variables
 	master := config.Master
 	input := config.InputData
@@ -447,7 +447,11 @@ func StartMaster(config *Config) error {
 	}()
 
 	<-me.DoneChan
-	time.Sleep(5e9)
+
+	err = Merge(r, reduceFunc)
+	if err != nil {
+		log.Println(err)
+	}
 
 	return nil
 }
@@ -485,6 +489,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 		*/
 		//for resp.Message == WAIT {
 		for resp.Type == TYPE_WAIT {
+			time.Sleep(1e9)
 			err = call(master, "GetWork", req, &resp)
 			if err != nil {
 				failure("GetWork")
@@ -790,7 +795,10 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 
 		if resp.Message == WORK_DONE {
 			log.Println("Notified - Finished Working")
-			//CleanUp(m, r)
+			log.Println("Waiting for word from master to clean up...")
+			// TODO: Wait for word from master
+
+			//CleanUp
 			os.Remove("aggregate.sql")
 			for r:=0; r<work.R; r++ {
 				for m:=0; m<work.M; m++ {

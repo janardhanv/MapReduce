@@ -90,11 +90,7 @@ func main() {
 		config.M = m
 		config.R = r
 		config.Table = table
-		err := mapreduce.StartMaster(&config)
-		if err != nil {
-			log.Println(err)
-		}
-		err = mapreduce.Merge(r, wordCountReducer)
+		err := mapreduce.StartMaster(&config, wordCountReducer)
 		if err != nil {
 			log.Println(err)
 		}
