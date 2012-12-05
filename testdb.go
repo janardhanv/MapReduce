@@ -9,11 +9,11 @@ import (
 )
 
 func main() {
-	file := "db.sql"
+	file := os.Args[1]
 	if len(os.Args) > 1 {
 		file = os.Args[1]
 	}
-	db, err := sql.Open("sqlite3", "./"+file)
+	db, err := sql.Open("sqlite3", file)
 	if err != nil {
 		log.Println(err)
 		return

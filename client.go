@@ -5,10 +5,13 @@ import (
 	"log"
 	"./mapreduce"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 )
+
+var re = regexp.MustCompile(`(?i:Nazi)`)
 
 func logf(format string, args ...interface{}) {
 	if true {
@@ -68,6 +71,23 @@ func wordCountReducer(key string, values <-chan string, output chan<- mapreduce.
 	return nil
 }
 
+func grepMapper(key, value string, output chan<- mapreduce.Pair) error {
+	// key -> title
+	// value -> article contents
+	defer close(output)
+	if re.MatchString(value) {
+		output <- mapreduce.Pair{ Key: key, Value: value }
+	}
+
+	return nil
+}
+
+func grepReducer(key string, values <-chan string, output chan<- mapreduce.Pair) error {
+	defer close(output)
+
+	return nil
+}
+
 func main() {
 	var input, master, output, table string
 	var m, r int
@@ -82,7 +102,7 @@ func main() {
 	flag.Parse()
 	if ismaster {
 		master = net.JoinHostPort(mapreduce.GetLocalAddress(), "3410")
-		logf("Master - File: %s, Maps: %d, Reduces: %d, Location: %s", input, m, r, master)
+		logf("Master -\n\tFile: %s\n\tMaps: %d\n\tReduces: %d\n\tLocation: %s\n\tInput: %s\n\tOutput: %s", input, m, r, master, input, output)
 		var config mapreduce.Config
 		config.Master = master
 		config.InputData = input

@@ -71,6 +71,7 @@ type Response struct {
 	Mapper int
 	Reducer int
 	Work Work
+	Output string
 }
 
 type Master struct {
@@ -85,6 +86,7 @@ type Master struct {
 	DoneChan chan int
 	Merged bool
 	Table string
+	Output string
 }
 
 type Work struct {
@@ -100,6 +102,7 @@ type Work struct {
 }
 
 func (self *Master) GetWork(_ Request, response *Response) error {
+	response.Output = self.Output
 	if len(self.Maps) > 0 { // MAP
 		log.Println("Assigning MAP work")
 		response.Type = TYPE_MAP
@@ -168,7 +171,8 @@ func CleanUp(M int, R int) error {
 }
 	*/
 
-func Merge(R int, reduceFunc ReduceFunc) error {
+func Merge(R int, reduceFunc ReduceFunc, output string) error {
+	os.Mkdir("/tmp/squinn", 1777)
 	// Combine all the rows into a single input file
 	sqls := []string{
 		"create table if not exists data (key text not null, value text not null)",
@@ -176,7 +180,8 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 	}
 	for i:=0; i<R; i++ {
 		//db, err := sql.Open("sqlite3", fmt.Sprintf("/home/s/squinn/tmp/reduce_out_%d.sql", i)) //TODO
-		db, err := sql.Open("sqlite3", fmt.Sprintf("/Users/Ren/tmp/reduce_out_%d.sql", i))
+		//db, err := sql.Open("sqlite3", fmt.Sprintf("/Users/Ren/tmp/reduce_out_%d.sql", i))
+		db, err := sql.Open("sqlite3", fmt.Sprintf("%s/reduce_out_%d.sql", output, i))
 		if err != nil {
 			log.Println(err)
 			continue
@@ -198,7 +203,7 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 		}
 	}
 
-	agg_db, err := sql.Open("sqlite3", "./aggregate.sql")
+	agg_db, err := sql.Open("sqlite3", "/tmp/squinn/aggregate.sql")
 	for _, sql := range sqls {
 		_, err = agg_db.Exec(sql)
 		if err != nil {
@@ -207,7 +212,7 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 	}
 	agg_db.Close()
 
-	agg_db, err = sql.Open("sqlite3", ("./aggregate.sql"))
+	agg_db, err = sql.Open("sqlite3", ("/tmp/squinn/aggregate.sql"))
 	defer agg_db.Close()
 	rows, err := agg_db.Query("select key, value from data order by key asc;")
 	if err != nil {
@@ -264,7 +269,7 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 	outputPairs = append(outputPairs, p)
 
 	// Prepare tmp database
-	db_out, err := sql.Open("sqlite3", "output.sql")
+	db_out, err := sql.Open("sqlite3", fmt.Sprintf("%s/output.sql", output))
 	defer db_out.Close()
 	if err != nil {
 		log.Println(err)
@@ -387,7 +392,7 @@ func StartMaster(config *Config, reduceFunc ReduceFunc) error {
 	master := config.Master
 	input := config.InputData
 	table := config.Table
-	//output := config.Output //TODO: Directories don't work
+	output := config.Output //TODO: Directories don't work
 	m := config.M
 	r := config.R
 
@@ -434,6 +439,7 @@ func StartMaster(config *Config, reduceFunc ReduceFunc) error {
 	me.ReduceCount = 0
 	me.DoneChan = make(chan int)
 	me.Table = table
+	me.Output = output
 
 	rpc.Register(me)
 	rpc.HandleHTTP()
@@ -449,7 +455,7 @@ func StartMaster(config *Config, reduceFunc ReduceFunc) error {
 
 	<-me.DoneChan
 
-	err = Merge(r, reduceFunc)
+	err = Merge(r, reduceFunc, output)
 	if err != nil {
 		log.Println(err)
 	}
@@ -464,6 +470,7 @@ func StartMaster(config *Config, reduceFunc ReduceFunc) error {
  * select distinct key .....
  */
 func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
+	os.Mkdir("/tmp/squinn", 1777)
 	tasks_run := 0
 	for {
 		logf("===============================")
@@ -505,6 +512,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			*/
 		}
 		work := resp.Work
+		output := resp.Output
 		var myAddress string
 
 		/*
@@ -554,7 +562,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				reducer := big.NewInt(0)
 				reducer.Mod(hash(key), big.NewInt(int64(work.R)))
 				//db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64())) //TODO: Directories don't work
-				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("map_%d_out_%d.sql", work.WorkerID, reducer.Int64()))
+				db_tmp, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/squinn/map_%d_out_%d.sql", work.WorkerID, reducer.Int64()))
 				if err != nil {
 					log.Println(err)
 					failure(fmt.Sprintf("sql.Open - /tmp/map_output/%d/map_out_%d.sql", work.WorkerID, reducer.Int64()))
@@ -617,7 +625,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				// (4000 + work.WorkerID)
 				//http.Handle("/map_out_files/", http.FileServer(http.Dir(fmt.Sprintf("/tmp/map_output/%d", work.WorkerID)))) //TODO: Directories don't work
 				//fileServer := http.FileServer(http.Dir("/Homework/3410/mapreduce/"))
-				fileServer := http.FileServer(http.Dir("."))
+				fileServer := http.FileServer(http.Dir("/tmp/squinn/"))
 				log.Println("Listening on " + address)
 				log.Fatal(http.ListenAndServe(address, fileServer))
 			}(myAddress)
@@ -644,7 +652,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 					log.Fatal(err)
 				}
 
-				filename := fmt.Sprintf("map_out_%d_mapper_%d.sql", work.WorkerID, i)
+				filename := fmt.Sprintf("/tmp/squinn/map_out_%d_mapper_%d.sql", work.WorkerID, i)
 				filenames = append(filenames, filename)
 
 				err = ioutil.WriteFile(filename, file, 0777)
@@ -683,7 +691,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				}
 			}
 
-			reduce_db, err := sql.Open("sqlite3", fmt.Sprintf("./reduce_aggregate_%d.sql", work.WorkerID))
+			reduce_db, err := sql.Open("sqlite3", fmt.Sprintf("/tmp/squinn/reduce_aggregate_%d.sql", work.WorkerID))
 			for _, sql := range sqls {
 				_, err = reduce_db.Exec(sql)
 				if err != nil {
@@ -692,7 +700,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			}
 			reduce_db.Close()
 
-			reduce_db, err = sql.Open("sqlite3", fmt.Sprintf("./reduce_aggregate_%d.sql", work.WorkerID))
+			reduce_db, err = sql.Open("sqlite3", fmt.Sprintf("/tmp/squinn/reduce_aggregate_%d.sql", work.WorkerID))
 			defer reduce_db.Close()
 			rows, err := reduce_db.Query("select key, value from data order by key asc;")
 			if err != nil {
@@ -751,7 +759,8 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			// Prepare tmp database
 			// TODO: Use the command line parameter output
 			//db_out, err := sql.Open("sqlite3", fmt.Sprintf("/home/s/squinn/tmp/reduce_out_%d.sql", work.WorkerID))
-			db_out, err := sql.Open("sqlite3", fmt.Sprintf("/Users/Ren/tmp/reduce_out_%d.sql", work.WorkerID))
+			//db_out, err := sql.Open("sqlite3", fmt.Sprintf("/Users/Ren/tmp/reduce_out_%d.sql", work.WorkerID))
+			db_out, err := sql.Open("sqlite3", fmt.Sprintf("%s/reduce_out_%d.sql", output, work.WorkerID))
 			defer db_out.Close()
 			if err != nil {
 				log.Println(err)
@@ -809,6 +818,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			// TODO: Wait for word from master
 
 			//CleanUp
+			/*
 			os.Remove("aggregate.sql")
 			for r:=0; r<work.R; r++ {
 				for m:=0; m<work.M; m++ {
@@ -817,6 +827,8 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				}
 				os.Remove(fmt.Sprintf("reduce_aggregate_%d.sql", r))
 			}
+			*/
+			os.RemoveAll("/tmp/squinn")
 			return nil
 		}
 		tasks_run++
