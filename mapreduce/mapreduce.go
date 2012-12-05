@@ -175,7 +175,8 @@ func Merge(R int, reduceFunc ReduceFunc) error {
 		"create index if not exists data_key on data (key asc, value asc);",
 	}
 	for i:=0; i<R; i++ {
-		db, err := sql.Open("sqlite3", fmt.Sprintf("reduce_out_%d.sql", i))
+		//db, err := sql.Open("sqlite3", fmt.Sprintf("/home/s/squinn/tmp/reduce_out_%d.sql", i)) //TODO
+		db, err := sql.Open("sqlite3", fmt.Sprintf("/Users/Ren/tmp/reduce_out_%d.sql", i))
 		if err != nil {
 			log.Println(err)
 			continue
@@ -527,6 +528,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			}
 			defer db.Close()
 
+
 			// Query
 			rows, err := db.Query(fmt.Sprintf("select key, value from %s limit %d offset %d;", work.Table, work.Size, work.Offset))
 			if err != nil {
@@ -540,6 +542,12 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				var key string
 				var value string
 				rows.Scan(&key, &value)
+
+				// TODO: TURN OFF JOURNALING
+				//out.DB.Exec("pragma synchronous = off");
+				//out.DB.Exec("pragma journal_mode = off")
+
+				//TODO: CREATE INDEXES ON EACH DB SO ORDER BY WORKS FASTER
 
 				// Temp storage
 				// Each time the map function emits a key/value pair, you should figure out which reduce task that pair will go to.
@@ -741,7 +749,9 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			outputPairs = append(outputPairs, p)
 
 			// Prepare tmp database
-			db_out, err := sql.Open("sqlite3", fmt.Sprintf("reduce_out_%d.sql", work.WorkerID))
+			// TODO: Use the command line parameter output
+			//db_out, err := sql.Open("sqlite3", fmt.Sprintf("/home/s/squinn/tmp/reduce_out_%d.sql", work.WorkerID))
+			db_out, err := sql.Open("sqlite3", fmt.Sprintf("/Users/Ren/tmp/reduce_out_%d.sql", work.WorkerID))
 			defer db_out.Close()
 			if err != nil {
 				log.Println(err)
