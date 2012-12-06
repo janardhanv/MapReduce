@@ -177,6 +177,8 @@ func Merge(R int, reduceFunc ReduceFunc, output string) error {
 	sqls := []string{
 		"create table if not exists data (key text not null, value text not null)",
 		"create index if not exists data_key on data (key asc, value asc);",
+		"pragma synchronous = off;",
+		"pragma journal_mode = off;",
 	}
 	for i:=0; i<R; i++ {
 		//db, err := sql.Open("sqlite3", fmt.Sprintf("/home/s/squinn/tmp/reduce_out_%d.sql", i)) //TODO
@@ -279,6 +281,8 @@ func Merge(R int, reduceFunc ReduceFunc, output string) error {
 	sqls = []string{
 		"create table if not exists data (key text not null, value text not null)",
 		"create index if not exists data_key on data (key asc, value asc);",
+		"pragma synchronous = off;",
+		"pragma journal_mode = off;",
 	}
 	for _, sql := range sqls {
 		_, err = db_out.Exec(sql)
@@ -392,7 +396,7 @@ func StartMaster(config *Config, reduceFunc ReduceFunc) error {
 	master := config.Master
 	input := config.InputData
 	table := config.Table
-	output := config.Output //TODO: Directories don't work
+	output := config.Output
 	m := config.M
 	r := config.R
 
@@ -526,6 +530,7 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 
 		if resp.Type == TYPE_MAP {
 			logf("MAP ID: %d", work.WorkerID)
+			log.Printf("Range: %d-%d", work.Offset, work.Offset+work.Size)
 			log.Print("Running Map function on input data...")
 			// Load data
 			db, err := sql.Open("sqlite3", work.Filename)
@@ -574,6 +579,8 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 				sqls := []string{
 					"create table if not exists data (key text not null, value text not null)",
 					"create index if not exists data_key on data (key asc, value asc);",
+					"pragma synchronous = off;",
+					"pragma journal_mode = off;",
 				}
 				for _, sql := range sqls {
 					_, err = db_tmp.Exec(sql)
@@ -666,6 +673,8 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			sqls := []string{
 				"create table if not exists data (key text not null, value text not null)",
 				"create index if not exists data_key on data (key asc, value asc);",
+				"pragma synchronous = off;",
+				"pragma journal_mode = off;",
 			}
 
 			for _, file := range filenames {
@@ -770,6 +779,8 @@ func StartWorker(mapFunc MapFunc, reduceFunc ReduceFunc, master string) error {
 			sqls = []string{
 				"create table if not exists data (key text not null, value text not null)",
 				"create index if not exists data_key on data (key asc, value asc);",
+				"pragma synchronous = off;",
+				"pragma journal_mode = off;",
 			}
 			for _, sql := range sqls {
 				_, err = db_out.Exec(sql)
